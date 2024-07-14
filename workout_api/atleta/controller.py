@@ -1,6 +1,6 @@
 from datetime import datetime
 from uuid import uuid4
-from fastapi import APIRouter, Body, HTTPException, status
+from fastapi import APIRouter, Body, HTTPException, status, Query
 from pydantic import UUID4
 
 from workout_api.atleta.schemas import AtletaIn, AtletaOut, AtletaUpdate
@@ -10,6 +10,8 @@ from workout_api.centro_treinamento.models import CentroTreinamentoModel
 
 from workout_api.contrib.dependencies import DatabaseDependency
 from sqlalchemy.future import select
+from sqlalchemy.exc import IntegrityError
+from fastapi_pagination import Page, paginate
 
 router = APIRouter()
 
@@ -54,6 +56,11 @@ async def post(
         
         db_session.add(atleta_model)
         await db_session.commit()
+    except IntegrityError as e:
+        raise HTTPException(
+            status_code=status.HTTP_303_SEE_OTHER,
+            detail=f'Já existe um atleta cadastrado com o CPF: {atleta_in.cpf}'
+        )
     except Exception:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
@@ -62,18 +69,30 @@ async def post(
 
     return atleta_out
 
-
 @router.get(
-    '/', 
-    summary='Consultar todos os Atletas',
+    '/all', 
+    summary='Consultar todos os Atletas com Paginação',
     status_code=status.HTTP_200_OK,
-    response_model=list[AtletaOut],
+    response_model=Page[AtletaOut]
 )
-async def query(db_session: DatabaseDependency) -> list[AtletaOut]:
-    atletas: list[AtletaOut] = (await db_session.execute(select(AtletaModel))).scalars().all()
-    
-    return [AtletaOut.model_validate(atleta) for atleta in atletas]
+async def query_with_pagination(
+    db_session: DatabaseDependency,
+    limit: int = Query(10, description='Número máximo de itens por página'),
+    offset: int = Query(0, description='Número de itens para pular')
+):
+    query = select(AtletaModel)
 
+    atletas = (await db_session.execute(query)).scalars().all()
+
+    if not atletas:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, 
+            detail='Nenhum atleta encontrado'
+        )
+
+    paginated_atletas = paginate(atletas)
+
+    return paginated_atletas
 
 @router.get(
     '/{id}', 
@@ -93,6 +112,40 @@ async def get(id: UUID4, db_session: DatabaseDependency) -> AtletaOut:
         )
     
     return atleta
+
+
+@router.get(
+    '/', 
+    summary='Consultar todos os Atletas',
+    status_code=status.HTTP_200_OK,
+    response_model=list[AtletaOut],
+)
+async def query(db_session: DatabaseDependency, nome: str = Query(None), cpf: str = Query(None)) -> list[AtletaOut]:
+    if nome:
+        query = query.where(AtletaModel.nome == nome)
+
+    if cpf:
+        query = query.where(AtletaModel.cpf == cpf)
+
+    atletas: list[AtletaOut] = (await db_session.execute(query)).scalars().all()
+    
+    atletas_dicts = []
+    for atleta in atletas:
+        atleta_dict = {
+            "nome": atleta.nome,
+            "centro_treinamento": {
+                "nome": atleta.centro_treinamento.nome,
+                "id": atleta.centro_treinamento.pk_id  
+            },
+            "categoria": {
+                "nome": atleta.categoria.nome,
+                "id": atleta.categoria.pk_id 
+            }
+        }
+        atletas_dicts.append(atleta_dict)
+    
+    return atletas_dicts
+
 
 
 @router.patch(
@@ -140,3 +193,4 @@ async def delete(id: UUID4, db_session: DatabaseDependency) -> None:
     
     await db_session.delete(atleta)
     await db_session.commit()
+    
